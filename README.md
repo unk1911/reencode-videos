@@ -19,7 +19,7 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 ## Usage
 
 ```bash
-./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force] [--yes] [--stabilize] [--tripod] [--smoothing N]
+./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force] [--yes] [--stabilize] [--tripod] [--smoothing N] [--keep-fov]
 ```
 
 - `<path>`: directory to scan, or a single `.mp4`/`.mov` file
@@ -60,6 +60,26 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 # it locks to one reference frame and makes the result worse, not better.
 ./reencode_videos.py /path/to/short_static_clip.mp4 --tripod --scale 1
 ```
+
+## Stabilization guide
+
+`vidstab` removes high-frequency *jitter*; it cannot remove intentional motion
+or fix baked-in motion blur. Pick the approach by footage type:
+
+| Footage | What to use |
+|---|---|
+| Shaky but roughly fixed framing (handheld talking-head, static subject) | `--stabilize` (default `--smoothing 10`); raise smoothing for a stronger effect |
+| A pan / moving shot that's jerky | `--stabilize --smoothing 60`–`100` `--keep-fov` — smooths the path into a glide and keeps full framing |
+| Short, near-static clip with slow drift | `--tripod` |
+| Fast pan **and** heavy motion blur | Don't bother — `vidstab` will look worse. Use an NLE (DaVinci Resolve is free) or an AI tool (Topaz) that can also deblur |
+
+Notes:
+- `--keep-fov` shows black borders instead of zooming in. Without it, large
+  corrections crop/zoom hard and magnify any blur.
+- `--tripod` locks to a single reference frame — great for short static shots,
+  actively *worse* on anything that pans or moves.
+- Stabilization quality is judged by eye, not by a metric. Always watch the
+  output before discarding the original (it's preserved in `--old-dir`).
 
 ## Requirements
 
