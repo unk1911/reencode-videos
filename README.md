@@ -31,7 +31,7 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 - `--dry-run`: preview only, no encoding
 - `--force` / `-f`: re-encode even if the file is already HEVC **or** was already processed (has a backup). The existing backup is always preserved, never overwritten.
 - `--yes` / `-y`: skip the confirmation prompt (batch mode)
-- `--stabilize` / `-s`: stabilize shaky footage. Runs a 2-pass `vidstab` operation — pass 1 (`vidstabdetect`) analyzes camera motion, pass 2 (`vidstabtransform`) warps each frame steady, then re-sharpens — before the downscale.
+- `--stabilize` / `-s`: stabilize shaky footage. Runs a 2-pass `vidstab` operation — pass 1 (`vidstabdetect`) analyzes camera motion, pass 2 (`vidstabtransform`) warps each frame steady, then re-sharpens — before the downscale. **Only suitable for footage that is jittery while holding a roughly fixed framing.** It is the *wrong* tool for fast pans or motion-blurred clips: correcting large motion forces a hard crop/zoom (visible "pumping"), leaves edge-warp smear, and can't remove baked-in motion blur — the result usually looks worse than the original. When in doubt, eyeball the output before keeping it.
 - `--tripod`: stabilize by locking every frame to a single reference frame (implies `--stabilize`). Eliminates drift on short clips but degrades over longer ones as the scene moves away from that reference.
 - `--smoothing`: `vidstab` smoothing window in frames (ignored with `--tripod`). Default: `10`.
 
