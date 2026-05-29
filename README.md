@@ -47,11 +47,14 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 # Downscale a file that is already HEVC (skipped by default, so force it)
 ./reencode_videos.py /path/to/iphone.mov --scale 4 --force
 
-# Stabilize shaky handheld footage (keep full resolution)
+# Stabilize shaky handheld footage (keep full resolution). This is the mode
+# you almost always want; raise --smoothing for stronger smoothing.
 ./reencode_videos.py /path/to/shaky.mp4 --stabilize --scale 1
+./reencode_videos.py /path/to/shaky.mp4 --stabilize --smoothing 30 --scale 1
 
-# Lock a short clip rock-steady (tripod mode)
-./reencode_videos.py /path/to/short_clip.mp4 --tripod --scale 1
+# Tripod mode — ONLY for short, near-static clips. On handheld/moving footage
+# it locks to one reference frame and makes the result worse, not better.
+./reencode_videos.py /path/to/short_static_clip.mp4 --tripod --scale 1
 ```
 
 ## Requirements

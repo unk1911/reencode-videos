@@ -94,15 +94,18 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
         fd, trf_name = tempfile.mkstemp(suffix=".trf", prefix="vidstab_")
         os.close(fd)
         trf_path = Path(trf_name)
+        # tripod mode must be set in BOTH passes: detect compares every frame to
+        # reference frame 1, and transform locks to it (smoothing=0). It kills
+        # drift on short, near-static clips but actively makes longer/moving
+        # footage worse as the scene drifts away from that reference — prefer
+        # plain --stabilize (smoothing) there.
+        detect_vf = "vidstabdetect=tripod=1:" if tripod else "vidstabdetect="
         detect_cmd = [
             FFMPEG, "-y", "-hwaccel", "cuda",
             "-i", str(input_path),
-            "-vf", f"vidstabdetect=result={trf_path}",
+            "-vf", f"{detect_vf}result={trf_path}",
             "-f", "null", "-",
         ]
-        # tripod locks every frame to a single reference (smoothing=0); kills
-        # drift on short clips but degrades over longer ones as the scene moves
-        # away from that reference.
         smooth = 0 if tripod else smoothing
         transform = f"vidstabtransform=input={trf_path}:smoothing={smooth}"
         if tripod:
@@ -265,6 +268,9 @@ def main():
     args = parser.parse_args()
     if args.tripod:
         args.stabilize = True
+        print("Note: --tripod locks to a single reference frame; it only helps on "
+              "short, near-static clips and can make handheld/moving footage WORSE. "
+              "For most footage use plain --stabilize instead.", file=sys.stderr)
 
     target = Path(args.path).expanduser().resolve()
     if not target.exists():
