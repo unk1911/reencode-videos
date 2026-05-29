@@ -18,12 +18,13 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 ## Usage
 
 ```bash
-./reencode_videos.py <path> [--scale N] [--cq N] [--recursive] [--old-dir DIR] [--dry-run] [--force]
+./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force]
 ```
 
 - `<path>`: directory to scan, or a single `.mp4`/`.mov` file
 - `--scale`: divisor for resolution (`4` = `iw/4:ih/4`)
 - `--cq`: NVENC quality (lower = better quality, larger files)
+- `--min-size`: minimum file size in MB to be eligible when scanning a directory (default: `25`)
 - `--recursive`: scan subfolders
 - `--old-dir`: where originals are moved (default: `/mnt/synology/oldvids`)
 - `--dry-run`: preview only, no encoding

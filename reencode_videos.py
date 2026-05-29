@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Re-encode and scale down bloated MP4/MOV files using ffmpeg + CUDA/HEVC.
-Finds .mp4/.mov files >= MIN_SIZE_MB in the target directory and re-encodes them.
+Finds .mp4/.mov files at/above a minimum size in the target directory and re-encodes them.
 """
 
 import argparse
@@ -13,14 +13,14 @@ from pathlib import Path
 
 FFMPEG = "/usr/bin/ffmpeg"
 FFPROBE = "/usr/bin/ffprobe"
-MIN_SIZE_MB = 50
+DEFAULT_MIN_SIZE_MB = 25
 DEFAULT_OLD_DIR = "/mnt/synology/oldvids"
 
 
-def find_candidates(directory: Path, recursive: bool) -> list[Path]:
+def find_candidates(directory: Path, recursive: bool, min_size_mb: int) -> list[Path]:
     prefix = "**/" if recursive else ""
     extensions = ("*.mp4", "*.MP4", "*.mov", "*.MOV")
-    min_bytes = MIN_SIZE_MB * 1024 * 1024
+    min_bytes = min_size_mb * 1024 * 1024
     seen: set[Path] = set()
     candidates = []
     for ext in extensions:
@@ -152,6 +152,10 @@ def main():
         help="NVENC CQ quality (lower=better quality/bigger file). Default: 28"
     )
     parser.add_argument(
+        "--min-size", type=int, default=DEFAULT_MIN_SIZE_MB, metavar="MB",
+        help=f"Minimum file size in MB to be eligible. Default: {DEFAULT_MIN_SIZE_MB}"
+    )
+    parser.add_argument(
         "--recursive", "-r", action="store_true",
         help="Scan subdirectories recursively"
     )
@@ -176,7 +180,7 @@ def main():
 
     if target.is_dir():
         scan_dir = target
-        candidates = find_candidates(scan_dir, args.recursive)
+        candidates = find_candidates(scan_dir, args.recursive, args.min_size)
     elif target.is_file():
         scan_dir = target.parent
         valid_exts = {".mp4", ".mov"}
@@ -196,7 +200,7 @@ def main():
     print(f"Scanning: {target}")
     print(f"Old dir:  {old_base}")
     print(f"Settings: scale=1/{args.scale}, cq={args.cq}, "
-          f"min_size={MIN_SIZE_MB}MB, recursive={args.recursive}")
+          f"min_size={args.min_size}MB, recursive={args.recursive}")
     if args.dry_run:
         print("DRY RUN mode — nothing will be encoded")
 
