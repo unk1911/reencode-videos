@@ -68,8 +68,10 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
     old_path = old_base / rel
     tmp_path = input_path.with_stem(input_path.stem + "_reencoding_tmp")
 
-    if old_path.exists():
-        print(f"  [SKIP] already processed (found in oldvids): {input_path.name}")
+    backup_exists = old_path.exists()
+    if backup_exists and not force:
+        print(f"  [SKIP] already processed (found in oldvids): {input_path.name} "
+              f"(use --force to re-encode anyway)")
         return "skipped"
 
     if not force:
@@ -91,7 +93,10 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
 
     input_size = input_path.stat().st_size
     print(f"\n  Input:   {input_path.name}  ({human_size(input_size)})")
-    print(f"  Backup:  {old_path}")
+    if backup_exists:
+        print(f"  Backup:  {old_path}  (already exists — original preserved, not overwritten)")
+    else:
+        print(f"  Backup:  {old_path}")
     print(f"  Command: {' '.join(cmd)}")
 
     if dry_run:
@@ -106,29 +111,42 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
             tmp_path.unlink()
         return "error"
 
-    # Move original to old_base (mirroring subdir structure), rename tmp to original name
-    old_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        # Some network filesystems reject metadata ops used by copy2.
-        # copyfile avoids copystat/utime while still moving file contents.
-        shutil.move(str(input_path), str(old_path), copy_function=shutil.copyfile)
-    except Exception as e:
-        print(f"  [ERROR] failed to move original to backup: {e}")
-        if tmp_path.exists():
-            tmp_path.unlink()
-        return "error"
+    if backup_exists:
+        # The true original is already safe in old_base; the file in place is a
+        # prior re-encode. Replace it with the new encode and leave the backup
+        # untouched so we never clobber the original. tmp is in the same dir, so
+        # this is an atomic same-filesystem replace.
+        try:
+            tmp_path.replace(input_path)
+        except Exception as e:
+            print(f"  [ERROR] failed to replace file with encoded version: {e}")
+            if tmp_path.exists():
+                tmp_path.unlink()
+            return "error"
+    else:
+        # Move original to old_base (mirroring subdir structure), rename tmp to original name
+        old_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Some network filesystems reject metadata ops used by copy2.
+            # copyfile avoids copystat/utime while still moving file contents.
+            shutil.move(str(input_path), str(old_path), copy_function=shutil.copyfile)
+        except Exception as e:
+            print(f"  [ERROR] failed to move original to backup: {e}")
+            if tmp_path.exists():
+                tmp_path.unlink()
+            return "error"
 
-    try:
-        tmp_path.rename(input_path)
-    except Exception as e:
-        print(f"  [ERROR] failed to replace original with encoded file: {e}")
-        # Best-effort rollback so source file path is restored.
-        if old_path.exists() and not input_path.exists():
-            try:
-                shutil.move(str(old_path), str(input_path), copy_function=shutil.copyfile)
-            except Exception as rollback_err:
-                print(f"  [ERROR] rollback failed: {rollback_err}")
-        return "error"
+        try:
+            tmp_path.rename(input_path)
+        except Exception as e:
+            print(f"  [ERROR] failed to replace original with encoded file: {e}")
+            # Best-effort rollback so source file path is restored.
+            if old_path.exists() and not input_path.exists():
+                try:
+                    shutil.move(str(old_path), str(input_path), copy_function=shutil.copyfile)
+                except Exception as rollback_err:
+                    print(f"  [ERROR] rollback failed: {rollback_err}")
+            return "error"
 
     output_size = input_path.stat().st_size
     ratio = input_size / output_size if output_size else 0
@@ -165,7 +183,12 @@ def main():
     )
     parser.add_argument(
         "--force", "-f", action="store_true",
-        help="Re-encode even if the file is already HEVC"
+        help="Re-encode even if already HEVC or already processed (the existing "
+             "backup is preserved, never overwritten)"
+    )
+    parser.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the confirmation prompt (batch mode)"
     )
     parser.add_argument(
         "--old-dir", default=DEFAULT_OLD_DIR,
@@ -212,7 +235,7 @@ def main():
     for f in candidates:
         print(f"  {f.relative_to(scan_dir)}  ({human_size(f.stat().st_size)})")
 
-    if not args.dry_run:
+    if not args.dry_run and not args.yes:
         confirm = input(f"\nProceed with encoding {len(candidates)} file(s)? [y/N] ")
         if confirm.strip().lower() != "y":
             print("Aborted.")

@@ -18,7 +18,7 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 ## Usage
 
 ```bash
-./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force]
+./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force] [--yes]
 ```
 
 - `<path>`: directory to scan, or a single `.mp4`/`.mov` file
@@ -28,7 +28,8 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 - `--recursive`: scan subfolders
 - `--old-dir`: where originals are moved (default: `/mnt/synology/oldvids`)
 - `--dry-run`: preview only, no encoding
-- `--force`: re-encode even if the file is already HEVC (bypasses the skip check)
+- `--force` / `-f`: re-encode even if the file is already HEVC **or** was already processed (has a backup). The existing backup is always preserved, never overwritten.
+- `--yes` / `-y`: skip the confirmation prompt (batch mode)
 
 ## Examples
 
