@@ -64,7 +64,7 @@ def video_codec(path: Path) -> str | None:
 
 def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: int,
              dry_run: bool, force: bool, stabilize: bool, tripod: bool,
-             smoothing: int) -> str:
+             smoothing: int, keep_fov: bool) -> str:
     # Mirror relative path inside old_base to avoid collisions across subdirs
     rel = input_path.relative_to(scan_dir)
     old_path = old_base / rel
@@ -110,6 +110,10 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
         transform = f"vidstabtransform=input={trf_path}:smoothing={smooth}"
         if tripod:
             transform += ":tripod=1"
+        if keep_fov:
+            # Preserve full field-of-view: no zoom-in, show black borders where
+            # the warp pushes the frame off, instead of zooming/cropping in.
+            transform += ":optzoom=0:crop=black"
         vf_parts.append(transform)
         vf_parts.append("unsharp=5:5:0.8:3:3:0.4")  # vidstab-recommended re-sharpen
     vf_parts.append(f"scale=iw/{scale}:ih/{scale}")
@@ -262,6 +266,11 @@ def main():
         help="vidstab smoothing window in frames (ignored with --tripod). Default: 10"
     )
     parser.add_argument(
+        "--keep-fov", action="store_true",
+        help="When stabilizing, preserve full field-of-view (show black borders) "
+             "instead of zooming/cropping in. Pairs well with a high --smoothing"
+    )
+    parser.add_argument(
         "--old-dir", default=DEFAULT_OLD_DIR,
         help=f"Directory to move originals into. Default: {DEFAULT_OLD_DIR}"
     )
@@ -300,6 +309,8 @@ def main():
     print(f"Old dir:  {old_base}")
     if args.stabilize:
         stab = "tripod" if args.tripod else f"smoothing={args.smoothing}"
+        if args.keep_fov:
+            stab += ",keep-fov"
     else:
         stab = "off"
     print(f"Settings: scale=1/{args.scale}, cq={args.cq}, "
@@ -331,7 +342,8 @@ def main():
         print(f"[{i}/{total}  {pct:.0f}%] ── {f.name}")
         original_size = f.stat().st_size
         status = reencode(f, scan_dir, old_base, args.scale, args.cq, args.dry_run,
-                           args.force, args.stabilize, args.tripod, args.smoothing)
+                           args.force, args.stabilize, args.tripod, args.smoothing,
+                           args.keep_fov)
         if status == "encoded":
             encoded += 1
             total_saved += original_size - f.stat().st_size

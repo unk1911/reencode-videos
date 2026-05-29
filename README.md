@@ -34,6 +34,7 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 - `--stabilize` / `-s`: stabilize shaky footage. Runs a 2-pass `vidstab` operation — pass 1 (`vidstabdetect`) analyzes camera motion, pass 2 (`vidstabtransform`) warps each frame steady, then re-sharpens — before the downscale. **Only suitable for footage that is jittery while holding a roughly fixed framing.** It is the *wrong* tool for fast pans or motion-blurred clips: correcting large motion forces a hard crop/zoom (visible "pumping"), leaves edge-warp smear, and can't remove baked-in motion blur — the result usually looks worse than the original. When in doubt, eyeball the output before keeping it.
 - `--tripod`: stabilize by locking every frame to a single reference frame (implies `--stabilize`). Eliminates drift on short clips but degrades over longer ones as the scene moves away from that reference.
 - `--smoothing`: `vidstab` smoothing window in frames (ignored with `--tripod`). Default: `10`.
+- `--keep-fov`: when stabilizing, preserve the full field-of-view (show black borders where the warp pushes the frame off) instead of zooming/cropping in. Useful for pans where the default zoom-crop loses too much framing. Pairs well with a high `--smoothing` (e.g. `60`–`100`).
 
 ## Examples
 
@@ -51,6 +52,9 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 # you almost always want; raise --smoothing for stronger smoothing.
 ./reencode_videos.py /path/to/shaky.mp4 --stabilize --scale 1
 ./reencode_videos.py /path/to/shaky.mp4 --stabilize --smoothing 30 --scale 1
+
+# Smooth a pan without zooming in — keep full framing, allow black borders
+./reencode_videos.py /path/to/pan.mp4 --stabilize --smoothing 80 --keep-fov --scale 1
 
 # Tripod mode — ONLY for short, near-static clips. On handheld/moving footage
 # it locks to one reference frame and makes the result worse, not better.
