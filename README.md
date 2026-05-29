@@ -7,6 +7,10 @@ It uses `ffmpeg` with NVIDIA NVENC (`hevc_nvenc`) to:
 - re-encode to HEVC,
 - keep a backup of the original in a separate `old` directory.
 
+Re-runs are safe: before encoding, the tool probes each file with `ffprobe` and skips
+anything already encoded as HEVC, so running the same command twice won't re-compress
+(and degrade) a file you've already processed. Use `--force` to override this.
+
 ## Typical use case
 
 Phone videos are often much larger than needed for storage/sharing. This script batch-processes a folder (or a single file), shrinking files heavily while keeping quality "good enough" for casual viewing.
@@ -14,7 +18,7 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 ## Usage
 
 ```bash
-./reencode_videos.py <path> [--scale N] [--cq N] [--recursive] [--old-dir DIR] [--dry-run]
+./reencode_videos.py <path> [--scale N] [--cq N] [--recursive] [--old-dir DIR] [--dry-run] [--force]
 ```
 
 - `<path>`: directory to scan, or a single `.mp4`/`.mov` file
@@ -23,6 +27,7 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 - `--recursive`: scan subfolders
 - `--old-dir`: where originals are moved (default: `/mnt/synology/oldvids`)
 - `--dry-run`: preview only, no encoding
+- `--force`: re-encode even if the file is already HEVC (bypasses the skip check)
 
 ## Examples
 
@@ -32,10 +37,14 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 
 # Re-encode all eligible files in a folder
 ./reencode_videos.py /path/to/folder --recursive
+
+# Downscale a file that is already HEVC (skipped by default, so force it)
+./reencode_videos.py /path/to/iphone.mov --scale 4 --force
 ```
 
 ## Requirements
 
 - Python 3.10+
 - `ffmpeg` installed at `/usr/bin/ffmpeg`
+- `ffprobe` installed at `/usr/bin/ffprobe` (ships with ffmpeg; used for the HEVC skip check)
 - NVIDIA GPU + drivers (for `hevc_nvenc`)

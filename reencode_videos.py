@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 FFMPEG = "/usr/bin/ffmpeg"
+FFPROBE = "/usr/bin/ffprobe"
 MIN_SIZE_MB = 50
 DEFAULT_OLD_DIR = "/mnt/synology/oldvids"
 
@@ -42,7 +43,26 @@ def human_size(n_bytes: int) -> str:
     return f"{n_bytes:.1f} TB"
 
 
-def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: int, dry_run: bool) -> bool:
+def video_codec(path: Path) -> str | None:
+    """Return the codec_name of the first video stream, or None if undetermined."""
+    cmd = [
+        FFPROBE, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: int,
+             dry_run: bool, force: bool) -> str:
     # Mirror relative path inside old_base to avoid collisions across subdirs
     rel = input_path.relative_to(scan_dir)
     old_path = old_base / rel
@@ -50,7 +70,14 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
 
     if old_path.exists():
         print(f"  [SKIP] already processed (found in oldvids): {input_path.name}")
-        return False
+        return "skipped"
+
+    if not force:
+        codec = video_codec(input_path)
+        if codec == "hevc":
+            print(f"  [SKIP] already HEVC, nothing to gain: {input_path.name} "
+                  f"(use --force to re-encode anyway)")
+            return "skipped"
 
     cmd = [
         FFMPEG, "-hwaccel", "cuda",
@@ -69,7 +96,7 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
 
     if dry_run:
         print("  [DRY RUN] skipping actual encode")
-        return False
+        return "dryrun"
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -77,7 +104,7 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
         print(f"  [ERROR] ffmpeg failed:\n{result.stderr[-2000:]}")
         if tmp_path.exists():
             tmp_path.unlink()
-        return False
+        return "error"
 
     # Move original to old_base (mirroring subdir structure), rename tmp to original name
     old_path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,7 +116,7 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
         print(f"  [ERROR] failed to move original to backup: {e}")
         if tmp_path.exists():
             tmp_path.unlink()
-        return False
+        return "error"
 
     try:
         tmp_path.rename(input_path)
@@ -101,14 +128,14 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
                 shutil.move(str(old_path), str(input_path), copy_function=shutil.copyfile)
             except Exception as rollback_err:
                 print(f"  [ERROR] rollback failed: {rollback_err}")
-        return False
+        return "error"
 
     output_size = input_path.stat().st_size
     ratio = input_size / output_size if output_size else 0
     saved = input_size - output_size
     print(f"  Done.  {human_size(input_size)} -> {human_size(output_size)}  "
           f"(saved {human_size(saved)}, {ratio:.1f}x smaller)")
-    return True
+    return "encoded"
 
 
 def main():
@@ -131,6 +158,10 @@ def main():
     parser.add_argument(
         "--dry-run", "-n", action="store_true",
         help="Show what would be done without encoding"
+    )
+    parser.add_argument(
+        "--force", "-f", action="store_true",
+        help="Re-encode even if the file is already HEVC"
     )
     parser.add_argument(
         "--old-dir", default=DEFAULT_OLD_DIR,
@@ -192,16 +223,14 @@ def main():
         pct = i / total * 100
         print(f"[{i}/{total}  {pct:.0f}%] ── {f.name}")
         original_size = f.stat().st_size
-        ok = reencode(f, scan_dir, old_base, args.scale, args.cq, args.dry_run)
-        if ok:
+        status = reencode(f, scan_dir, old_base, args.scale, args.cq, args.dry_run, args.force)
+        if status == "encoded":
             encoded += 1
             total_saved += original_size - f.stat().st_size
-        elif not args.dry_run:
-            old_path = old_base / f.relative_to(scan_dir)
-            if old_path.exists():
-                skipped += 1
-            else:
-                errors += 1
+        elif status == "skipped":
+            skipped += 1
+        elif status == "error":
+            errors += 1
 
     print(f"\n{'='*50}")
     print(f"Done. Encoded: {encoded}  Skipped: {skipped}  Errors: {errors}")
