@@ -5,6 +5,7 @@ A small CLI tool to drastically reduce the size of cellphone-recorded `.mp4`/`.m
 It uses `ffmpeg` with NVIDIA NVENC (`hevc_nvenc`) to:
 - downscale resolution (for example to 1/2 or 1/4),
 - re-encode to HEVC,
+- optionally stabilize shaky footage (2-pass `vidstab`),
 - keep a backup of the original in a separate `old` directory.
 
 Re-runs are safe: before encoding, the tool probes each file with `ffprobe` and skips
@@ -18,7 +19,7 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 ## Usage
 
 ```bash
-./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force] [--yes]
+./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force] [--yes] [--stabilize] [--tripod] [--smoothing N]
 ```
 
 - `<path>`: directory to scan, or a single `.mp4`/`.mov` file
@@ -30,6 +31,9 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 - `--dry-run`: preview only, no encoding
 - `--force` / `-f`: re-encode even if the file is already HEVC **or** was already processed (has a backup). The existing backup is always preserved, never overwritten.
 - `--yes` / `-y`: skip the confirmation prompt (batch mode)
+- `--stabilize` / `-s`: stabilize shaky footage. Runs a 2-pass `vidstab` operation — pass 1 (`vidstabdetect`) analyzes camera motion, pass 2 (`vidstabtransform`) warps each frame steady, then re-sharpens — before the downscale.
+- `--tripod`: stabilize by locking every frame to a single reference frame (implies `--stabilize`). Eliminates drift on short clips but degrades over longer ones as the scene moves away from that reference.
+- `--smoothing`: `vidstab` smoothing window in frames (ignored with `--tripod`). Default: `10`.
 
 ## Examples
 
@@ -42,6 +46,12 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 
 # Downscale a file that is already HEVC (skipped by default, so force it)
 ./reencode_videos.py /path/to/iphone.mov --scale 4 --force
+
+# Stabilize shaky handheld footage (keep full resolution)
+./reencode_videos.py /path/to/shaky.mp4 --stabilize --scale 1
+
+# Lock a short clip rock-steady (tripod mode)
+./reencode_videos.py /path/to/short_clip.mp4 --tripod --scale 1
 ```
 
 ## Requirements
@@ -49,4 +59,5 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 - Python 3.10+
 - `ffmpeg` installed at `/usr/bin/ffmpeg`
 - `ffprobe` installed at `/usr/bin/ffprobe` (ships with ffmpeg; used for the HEVC skip check)
+- ffmpeg built with `--enable-libvidstab` (only needed for `--stabilize` / `--tripod`)
 - NVIDIA GPU + drivers (for `hevc_nvenc`)

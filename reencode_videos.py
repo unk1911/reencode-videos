@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 FFMPEG = "/usr/bin/ffmpeg"
@@ -62,7 +63,8 @@ def video_codec(path: Path) -> str | None:
 
 
 def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: int,
-             dry_run: bool, force: bool) -> str:
+             dry_run: bool, force: bool, stabilize: bool, tripod: bool,
+             smoothing: int) -> str:
     # Mirror relative path inside old_base to avoid collisions across subdirs
     rel = input_path.relative_to(scan_dir)
     old_path = old_base / rel
@@ -81,15 +83,50 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
                   f"(use --force to re-encode anyway)")
             return "skipped"
 
-    cmd = [
-        FFMPEG, "-hwaccel", "cuda",
+    # Build the video filter chain. When stabilizing, vidstab is a 2-pass op:
+    # pass 1 (vidstabdetect) writes a transforms file describing camera motion;
+    # pass 2 (vidstabtransform) warps each frame steady. Stabilize runs before
+    # the downscale so motion is measured at full resolution.
+    trf_path = None
+    detect_cmd = None
+    vf_parts = []
+    if stabilize:
+        fd, trf_name = tempfile.mkstemp(suffix=".trf", prefix="vidstab_")
+        os.close(fd)
+        trf_path = Path(trf_name)
+        detect_cmd = [
+            FFMPEG, "-y", "-hwaccel", "cuda",
+            "-i", str(input_path),
+            "-vf", f"vidstabdetect=result={trf_path}",
+            "-f", "null", "-",
+        ]
+        # tripod locks every frame to a single reference (smoothing=0); kills
+        # drift on short clips but degrades over longer ones as the scene moves
+        # away from that reference.
+        smooth = 0 if tripod else smoothing
+        transform = f"vidstabtransform=input={trf_path}:smoothing={smooth}"
+        if tripod:
+            transform += ":tripod=1"
+        vf_parts.append(transform)
+        vf_parts.append("unsharp=5:5:0.8:3:3:0.4")  # vidstab-recommended re-sharpen
+    vf_parts.append(f"scale=iw/{scale}:ih/{scale}")
+    vf = ",".join(vf_parts)
+
+    encode_cmd = [
+        FFMPEG, "-y", "-hwaccel", "cuda",
         "-i", str(input_path),
-        "-vf", f"scale=iw/{scale}:ih/{scale}",
+        "-vf", vf,
         "-c:v", "hevc_nvenc",
         "-cq", str(cq),
         "-c:a", "aac",
         str(tmp_path),
     ]
+
+    def cleanup():
+        if tmp_path.exists():
+            tmp_path.unlink()
+        if trf_path and trf_path.exists():
+            trf_path.unlink()
 
     input_size = input_path.stat().st_size
     print(f"\n  Input:   {input_path.name}  ({human_size(input_size)})")
@@ -97,19 +134,37 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
         print(f"  Backup:  {old_path}  (already exists — original preserved, not overwritten)")
     else:
         print(f"  Backup:  {old_path}")
-    print(f"  Command: {' '.join(cmd)}")
+    if detect_cmd:
+        mode = "tripod" if tripod else f"smoothing={smoothing}"
+        print(f"  Stabilize: 2-pass vidstab ({mode})")
+        print(f"  Pass 1:  {' '.join(detect_cmd)}")
+        print(f"  Pass 2:  {' '.join(encode_cmd)}")
+    else:
+        print(f"  Command: {' '.join(encode_cmd)}")
 
     if dry_run:
         print("  [DRY RUN] skipping actual encode")
+        cleanup()
         return "dryrun"
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    if detect_cmd:
+        print("  [stabilize] pass 1/2: analyzing camera motion...")
+        detect = subprocess.run(detect_cmd, capture_output=True, text=True)
+        if detect.returncode != 0:
+            print(f"  [ERROR] vidstabdetect failed:\n{detect.stderr[-2000:]}")
+            cleanup()
+            return "error"
+        print("  [stabilize] pass 2/2: transforming + encoding...")
+
+    result = subprocess.run(encode_cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
         print(f"  [ERROR] ffmpeg failed:\n{result.stderr[-2000:]}")
-        if tmp_path.exists():
-            tmp_path.unlink()
+        cleanup()
         return "error"
+
+    if trf_path and trf_path.exists():
+        trf_path.unlink()
 
     if backup_exists:
         # The true original is already safe in old_base; the file in place is a
@@ -191,10 +246,25 @@ def main():
         help="Skip the confirmation prompt (batch mode)"
     )
     parser.add_argument(
+        "--stabilize", "-s", action="store_true",
+        help="Stabilize shaky footage with a 2-pass ffmpeg vidstab analysis/transform"
+    )
+    parser.add_argument(
+        "--tripod", action="store_true",
+        help="Stabilize by locking to a single reference frame (implies --stabilize). "
+             "Best for short clips; drifts on long ones"
+    )
+    parser.add_argument(
+        "--smoothing", type=int, default=10, metavar="N",
+        help="vidstab smoothing window in frames (ignored with --tripod). Default: 10"
+    )
+    parser.add_argument(
         "--old-dir", default=DEFAULT_OLD_DIR,
         help=f"Directory to move originals into. Default: {DEFAULT_OLD_DIR}"
     )
     args = parser.parse_args()
+    if args.tripod:
+        args.stabilize = True
 
     target = Path(args.path).expanduser().resolve()
     if not target.exists():
@@ -222,8 +292,12 @@ def main():
 
     print(f"Scanning: {target}")
     print(f"Old dir:  {old_base}")
+    if args.stabilize:
+        stab = "tripod" if args.tripod else f"smoothing={args.smoothing}"
+    else:
+        stab = "off"
     print(f"Settings: scale=1/{args.scale}, cq={args.cq}, "
-          f"min_size={args.min_size}MB, recursive={args.recursive}")
+          f"min_size={args.min_size}MB, recursive={args.recursive}, stabilize={stab}")
     if args.dry_run:
         print("DRY RUN mode — nothing will be encoded")
 
@@ -250,7 +324,8 @@ def main():
         pct = i / total * 100
         print(f"[{i}/{total}  {pct:.0f}%] ── {f.name}")
         original_size = f.stat().st_size
-        status = reencode(f, scan_dir, old_base, args.scale, args.cq, args.dry_run, args.force)
+        status = reencode(f, scan_dir, old_base, args.scale, args.cq, args.dry_run,
+                           args.force, args.stabilize, args.tripod, args.smoothing)
         if status == "encoded":
             encoded += 1
             total_saved += original_size - f.stat().st_size
