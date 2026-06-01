@@ -64,7 +64,7 @@ def video_codec(path: Path) -> str | None:
 
 def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: int,
              dry_run: bool, force: bool, stabilize: bool, tripod: bool,
-             smoothing: int, keep_fov: bool) -> str:
+             smoothing: int, keep_fov: bool, lossless: bool) -> str:
     # Mirror relative path inside old_base to avoid collisions across subdirs
     rel = input_path.relative_to(scan_dir)
     old_path = old_base / rel
@@ -124,10 +124,16 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
         "-i", str(input_path),
         "-vf", vf,
         "-c:v", "hevc_nvenc",
-        "-cq", str(cq),
-        "-c:a", "aac",
-        str(tmp_path),
     ]
+    if lossless:
+        # Truly lossless: pixel-identical to the (stabilized) frames. NVENC
+        # ignores -cq in this mode; output is usually LARGER than the already-
+        # compressed source. Use for a stabilize-only pass where you don't want
+        # to throw away any quality.
+        encode_cmd += ["-tune", "lossless"]
+    else:
+        encode_cmd += ["-cq", str(cq)]
+    encode_cmd += ["-c:a", "aac", str(tmp_path)]
 
     def cleanup():
         if tmp_path.exists():
@@ -229,7 +235,14 @@ def main():
     )
     parser.add_argument(
         "--cq", type=int, default=28,
-        help="NVENC CQ quality (lower=better quality/bigger file). Default: 28"
+        help="NVENC constant-quality level, 1-51 (lower=better quality/bigger "
+             "file). NOTE: 0 means 'automatic' (VBR), not lossless. Default: 28"
+    )
+    parser.add_argument(
+        "--lossless", action="store_true",
+        help="Encode truly lossless (-tune lossless); --cq is ignored. Output is "
+             "usually LARGER than the source. Use for stabilize-only passes where "
+             "you don't want to lose any quality"
     )
     parser.add_argument(
         "--min-size", type=int, default=DEFAULT_MIN_SIZE_MB, metavar="MB",
@@ -313,7 +326,8 @@ def main():
             stab += ",keep-fov"
     else:
         stab = "off"
-    print(f"Settings: scale=1/{args.scale}, cq={args.cq}, "
+    quality = "lossless" if args.lossless else f"cq={args.cq}"
+    print(f"Settings: scale=1/{args.scale}, {quality}, "
           f"min_size={args.min_size}MB, recursive={args.recursive}, stabilize={stab}")
     if args.dry_run:
         print("DRY RUN mode — nothing will be encoded")
@@ -343,7 +357,7 @@ def main():
         original_size = f.stat().st_size
         status = reencode(f, scan_dir, old_base, args.scale, args.cq, args.dry_run,
                            args.force, args.stabilize, args.tripod, args.smoothing,
-                           args.keep_fov)
+                           args.keep_fov, args.lossless)
         if status == "encoded":
             encoded += 1
             total_saved += original_size - f.stat().st_size

@@ -19,12 +19,13 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 ## Usage
 
 ```bash
-./reencode_videos.py <path> [--scale N] [--cq N] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force] [--yes] [--stabilize] [--tripod] [--smoothing N] [--keep-fov]
+./reencode_videos.py <path> [--scale N] [--cq N] [--lossless] [--min-size MB] [--recursive] [--old-dir DIR] [--dry-run] [--force] [--yes] [--stabilize] [--tripod] [--smoothing N] [--keep-fov]
 ```
 
 - `<path>`: directory to scan, or a single `.mp4`/`.mov` file
 - `--scale`: divisor for resolution (`4` = `iw/4:ih/4`)
-- `--cq`: NVENC quality (lower = better quality, larger files)
+- `--cq`: NVENC constant-quality level, `1`–`51` (lower = better quality, larger files; default `28`). **Watch out:** `--cq 0` does **not** mean "no compression" — to NVENC, `0` means *automatic* VBR, which can compress harder and look worse. For visually-lossless output use a low non-zero value like `--cq 18`; for truly lossless use `--lossless`.
+- `--lossless`: encode truly lossless (`-tune lossless`); `--cq` is ignored. The output is bit-exact to the (stabilized) frames, but is **usually larger than the source** because the original is already lossy-compressed. There is no way to make the output the *exact* same size as the input — re-encoding always changes the byte count. Use this for a stabilize-only pass (`--lossless --stabilize --scale 1`) when you don't want to throw away any quality.
 - `--min-size`: minimum file size in MB to be eligible when scanning a directory (default: `25`)
 - `--recursive`: scan subfolders
 - `--old-dir`: where originals are moved (default: `/mnt/synology/oldvids`)
@@ -55,6 +56,9 @@ Phone videos are often much larger than needed for storage/sharing. This script 
 
 # Smooth a pan without zooming in — keep full framing, allow black borders
 ./reencode_videos.py /path/to/pan.mp4 --stabilize --smoothing 80 --keep-fov --scale 1
+
+# Stabilize ONLY, throwing away no quality (truly lossless; output may be larger)
+./reencode_videos.py /path/to/shaky.mp4 --stabilize --lossless --scale 1
 
 # Tripod mode — ONLY for short, near-static clips. On handheld/moving footage
 # it locks to one reference frame and makes the result worse, not better.
