@@ -2,6 +2,10 @@
 """
 Re-encode and scale down bloated MP4/MOV files using ffmpeg + CUDA/HEVC.
 Finds .mp4/.mov files at/above a minimum size in the target directory and re-encodes them.
+
+With --convert, instead converts camera originals to portable siblings (kept
+alongside the untouched original): .MXF -> .mp4 (H.264 NVENC) and .CR3 -> .jpg
+(the camera's embedded full-res JPEG, via exiftool).
 """
 
 import argparse
@@ -14,8 +18,21 @@ from pathlib import Path
 
 FFMPEG = "/usr/bin/ffmpeg"
 FFPROBE = "/usr/bin/ffprobe"
+EXIFTOOL = shutil.which("exiftool") or "/usr/bin/exiftool"
 DEFAULT_MIN_SIZE_MB = 25
 DEFAULT_OLD_DIR = "/mnt/synology/oldvids"
+
+# Camera-original formats that --convert transcodes/rewraps into a friendly
+# sibling file. These are NOT handled by the normal shrink flow (which only
+# touches .mp4/.mov); conversion produces a NEW file and leaves the original
+# in place. Map of source extension -> output extension.
+VIDEO_CONVERT_EXTS = {".mxf": ".mp4"}
+IMAGE_CONVERT_EXTS = {".cr3": ".jpg"}
+CONVERT_EXTS = {**VIDEO_CONVERT_EXTS, **IMAGE_CONVERT_EXTS}
+CONVERT_TMP_MARKER = "_converting_tmp"
+# NVENC H.264 quality for MXF->MP4. Lower = better/bigger; 20 is visually high
+# quality at 4K. H.264 8-bit 4:2:0 is chosen for maximum playback compatibility.
+H264_CONVERT_CQ = 20
 
 
 def find_candidates(directory: Path, recursive: bool, min_size_mb: int) -> list[Path]:
@@ -60,6 +77,203 @@ def video_codec(path: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def audio_channel_counts(path: Path) -> list[int]:
+    """Return the channel count of each audio stream, in order (empty if none)."""
+    cmd = [
+        FFPROBE, "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=channels",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return []
+    if result.returncode != 0:
+        return []
+    counts = []
+    for line in result.stdout.split():
+        try:
+            counts.append(int(line))
+        except ValueError:
+            pass
+    return counts
+
+
+def find_convert_candidates(directory: Path, recursive: bool) -> list[Path]:
+    """Find camera-original files (.mxf/.cr3) eligible for --convert. No size
+    filter: 'convert these' should never silently skip a file for being small."""
+    prefix = "**/" if recursive else ""
+    seen: set[Path] = set()
+    candidates = []
+    for ext in CONVERT_EXTS:
+        # glob is case-sensitive; match both .mxf and .MXF etc.
+        for pattern_ext in (ext, ext.upper()):
+            for f in directory.glob(f"{prefix}*{pattern_ext}"):
+                if f in seen or not f.is_file():
+                    continue
+                seen.add(f)
+                if CONVERT_TMP_MARKER in f.stem:
+                    continue
+                candidates.append(f)
+    return sorted(candidates)
+
+
+def convert_video(input_path: Path, dry_run: bool, force: bool, scale: int = 1) -> str:
+    """Transcode a camera video (e.g. .MXF) to a compatibility .mp4 next to it.
+
+    H.264 8-bit 4:2:0 via NVENC for universal playback. With scale > 1 the frame
+    is downscaled iw/scale:ih/scale (e.g. scale=2 turns 4K into 1080p). Audio: if
+    the source has two or more mono tracks (typical Canon 4-channel layout) the
+    first two are joined into one stereo AAC track; a single track is mapped
+    as-is; no audio means a silent file. The original is left untouched."""
+    out_ext = VIDEO_CONVERT_EXTS[input_path.suffix.lower()]
+    out_path = input_path.with_suffix(out_ext)
+    tmp_path = input_path.with_stem(input_path.stem + CONVERT_TMP_MARKER).with_suffix(out_ext)
+
+    if out_path.exists() and not force:
+        print(f"  [SKIP] output already exists: {out_path.name} "
+              f"(use --force to overwrite)")
+        return "skipped"
+
+    # Build one filtergraph for both video (optional scale) and audio (optional
+    # stereo join) so we never mix -vf with -filter_complex.
+    filter_parts = []
+    if scale > 1:
+        filter_parts.append(f"[0:v:0]scale=iw/{scale}:ih/{scale}[vout]")
+        video_map = "[vout]"
+        scale_desc = f"scale 1/{scale}"
+    else:
+        video_map = "0:v:0"
+        scale_desc = "full resolution"
+
+    chans = audio_channel_counts(input_path)
+    audio_codec = []
+    if len(chans) >= 2 and chans[0] == 1 and chans[1] == 1:
+        audio_desc = "join ch1+ch2 -> stereo AAC"
+        filter_parts.append("[0:a:0][0:a:1]join=inputs=2:channel_layout=stereo[aout]")
+        audio_map = "[aout]"
+        audio_codec = ["-c:a", "aac", "-b:a", "256k"]
+    elif chans:
+        audio_desc = "map first audio track -> AAC"
+        audio_map = "0:a:0"
+        audio_codec = ["-c:a", "aac", "-b:a", "256k"]
+    else:
+        audio_desc = "no audio"
+        audio_map = None
+
+    cmd = [FFMPEG, "-y", "-hwaccel", "cuda", "-i", str(input_path)]
+    if filter_parts:
+        cmd += ["-filter_complex", ";".join(filter_parts)]
+    cmd += ["-map", video_map]
+    if audio_map is not None:
+        cmd += ["-map", audio_map] + audio_codec
+    else:
+        cmd += ["-an"]
+    cmd += [
+        "-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq",
+        "-rc", "vbr", "-cq", str(H264_CONVERT_CQ), "-b:v", "0",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        str(tmp_path),
+    ]
+
+    input_size = input_path.stat().st_size
+    print(f"\n  Input:   {input_path.name}  ({human_size(input_size)})")
+    print(f"  Output:  {out_path.name}  ({scale_desc}, original kept in place)")
+    print(f"  Audio:   {audio_desc}")
+    print(f"  Command: {' '.join(cmd)}")
+
+    if dry_run:
+        print("  [DRY RUN] skipping actual convert")
+        return "dryrun"
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"  [ERROR] ffmpeg failed:\n{result.stderr[-2000:]}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return "error"
+    try:
+        tmp_path.replace(out_path)
+    except Exception as e:
+        print(f"  [ERROR] failed to finalize output: {e}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return "error"
+
+    output_size = out_path.stat().st_size
+    print(f"  Done.  {out_path.name}  ({human_size(output_size)})")
+    return "converted"
+
+
+def extract_embedded_jpeg(path: Path) -> bytes | None:
+    """Pull the full-size JPEG the camera baked into a raw file. Tries the
+    full-res JpgFromRaw first, then the smaller PreviewImage as a fallback."""
+    for tag in ("-JpgFromRaw", "-PreviewImage"):
+        try:
+            result = subprocess.run([EXIFTOOL, "-b", tag, str(path)], capture_output=True)
+        except FileNotFoundError:
+            print(f"  [ERROR] exiftool not found at {EXIFTOOL} "
+                  f"(install: sudo apt install libimage-exiftool-perl)")
+            return None
+        # A real embedded JPEG is many KB; guard against an empty/odd extraction.
+        if result.returncode == 0 and len(result.stdout) > 1024:
+            return result.stdout
+    return None
+
+
+def convert_image(input_path: Path, dry_run: bool, force: bool) -> str:
+    """Extract the camera's embedded full-res JPEG from a raw image (e.g. .CR3)
+    to a .jpg next to it. Near-instant (no demosaic) and matches the camera's
+    own color rendering. The original raw is left untouched."""
+    out_ext = IMAGE_CONVERT_EXTS[input_path.suffix.lower()]
+    out_path = input_path.with_suffix(out_ext)
+    tmp_path = input_path.with_stem(input_path.stem + CONVERT_TMP_MARKER).with_suffix(out_ext)
+
+    if out_path.exists() and not force:
+        print(f"  [SKIP] output already exists: {out_path.name} "
+              f"(use --force to overwrite)")
+        return "skipped"
+
+    input_size = input_path.stat().st_size
+    print(f"\n  Input:   {input_path.name}  ({human_size(input_size)})")
+    print(f"  Output:  {out_path.name}  (embedded JPEG, original kept in place)")
+
+    if dry_run:
+        print("  [DRY RUN] skipping actual convert")
+        return "dryrun"
+
+    data = extract_embedded_jpeg(input_path)
+    if data is None:
+        print(f"  [ERROR] no embedded JPEG found in {input_path.name}")
+        return "error"
+    try:
+        tmp_path.write_bytes(data)
+        tmp_path.replace(out_path)
+    except Exception as e:
+        print(f"  [ERROR] failed to write output: {e}")
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return "error"
+
+    output_size = out_path.stat().st_size
+    print(f"  Done.  {out_path.name}  ({human_size(output_size)})")
+    return "converted"
+
+
+def convert_file(input_path: Path, dry_run: bool, force: bool, scale: int = 1) -> str:
+    """Route a camera-original file to the right converter by extension."""
+    ext = input_path.suffix.lower()
+    if ext in VIDEO_CONVERT_EXTS:
+        return convert_video(input_path, dry_run, force, scale)
+    if ext in IMAGE_CONVERT_EXTS:
+        # scale does not apply to embedded-JPEG extraction (it's a byte copy).
+        return convert_image(input_path, dry_run, force)
+    print(f"  [SKIP] not a convertible format: {input_path.name}")
+    return "skipped"
 
 
 def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: int,
@@ -224,14 +438,66 @@ def reencode(input_path: Path, scan_dir: Path, old_base: Path, scale: int, cq: i
     return "encoded"
 
 
+def run_convert_mode(target: Path, args) -> None:
+    """--convert: turn camera originals (.MXF/.CR3) into friendly siblings."""
+    if target.is_dir():
+        candidates = find_convert_candidates(target, args.recursive)
+    else:
+        if target.suffix.lower() not in CONVERT_EXTS:
+            print(f"Error: --convert supports {', '.join(sorted(CONVERT_EXTS))}; "
+                  f"got {target.suffix}", file=sys.stderr)
+            sys.exit(1)
+        candidates = [target]
+
+    scale_desc = "full res" if args.scale <= 1 else f"scale 1/{args.scale} (video)"
+    print(f"Scanning: {target}")
+    print(f"Settings: convert mode "
+          f"({', '.join(f'{s}->{d}' for s, d in CONVERT_EXTS.items())}), "
+          f"{scale_desc}, recursive={args.recursive}, force={args.force}")
+    if args.dry_run:
+        print("DRY RUN mode — nothing will be converted")
+
+    if not candidates:
+        print("No convertible files found.")
+        return
+
+    print(f"\nFound {len(candidates)} file(s) to convert:\n")
+    for f in candidates:
+        print(f"  {f.name}  ({human_size(f.stat().st_size)})  -> {CONVERT_EXTS[f.suffix.lower()]}")
+
+    if not args.dry_run and not args.yes:
+        confirm = input(f"\nProceed with converting {len(candidates)} file(s)? [y/N] ")
+        if confirm.strip().lower() != "y":
+            print("Aborted.")
+            return
+
+    print()
+    converted = skipped = errors = 0
+    total = len(candidates)
+    for i, f in enumerate(candidates, 1):
+        pct = i / total * 100
+        print(f"[{i}/{total}  {pct:.0f}%] ── {f.name}")
+        status = convert_file(f, args.dry_run, args.force, args.scale)
+        if status == "converted":
+            converted += 1
+        elif status == "skipped":
+            skipped += 1
+        elif status == "error":
+            errors += 1
+
+    print(f"\n{'='*50}")
+    print(f"Done. Converted: {converted}  Skipped: {skipped}  Errors: {errors}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Re-encode bloated MP4/MOV files with ffmpeg CUDA/HEVC."
     )
     parser.add_argument("path", help="Target directory to scan or a specific file")
     parser.add_argument(
-        "--scale", type=int, default=4,
-        help="Scale divisor (e.g. 4 = iw/4:ih/4). Default: 4"
+        "--scale", type=int, default=None,
+        help="Scale divisor (e.g. 4 = iw/4:ih/4). Default: 4 in shrink mode, "
+             "1 (full resolution) in --convert mode"
     )
     parser.add_argument(
         "--cq", type=int, default=28,
@@ -251,6 +517,15 @@ def main():
     parser.add_argument(
         "--recursive", "-r", action="store_true",
         help="Scan subdirectories recursively"
+    )
+    parser.add_argument(
+        "--convert", action="store_true",
+        help="Convert camera-original files to friendly siblings instead of "
+             "shrinking: .MXF -> .mp4 (H.264 NVENC, 4:2:0) and .CR3 -> .jpg "
+             "(embedded full-res JPEG). Writes a NEW file next to each original "
+             "and leaves the original in place. Honors --scale (default 1 = full "
+             "resolution; e.g. --scale 2 turns 4K MXF into 1080p). Ignores other "
+             "shrink-only flags (--cq/--stabilize/--min-size/--old-dir)"
     )
     parser.add_argument(
         "--dry-run", "-n", action="store_true",
@@ -288,6 +563,14 @@ def main():
         help=f"Directory to move originals into. Default: {DEFAULT_OLD_DIR}"
     )
     args = parser.parse_args()
+    # --scale defaults differ by mode: shrink downscales 1/4 by default, but a
+    # straight --convert keeps full resolution unless the user asks otherwise.
+    if args.scale is None:
+        args.scale = 1 if args.convert else 4
+    if args.scale < 1:
+        print("Error: --scale must be >= 1", file=sys.stderr)
+        sys.exit(1)
+
     if args.tripod:
         args.stabilize = True
         print("Note: --tripod locks to a single reference frame; it only helps on "
@@ -298,6 +581,10 @@ def main():
     if not target.exists():
         print(f"Error: path does not exist: {target}", file=sys.stderr)
         sys.exit(1)
+
+    if args.convert:
+        run_convert_mode(target, args)
+        return
 
     if target.is_dir():
         scan_dir = target
